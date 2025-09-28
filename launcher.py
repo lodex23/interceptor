@@ -46,7 +46,8 @@ def start_mitmdump(port: int, addon_path: str, opts: dict[str, str | bool]) -> s
         set_arg,
     ]
     print("Starting mitmdump:", " ".join(cmd))
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    # Inherit parent's stdio so the addon can show prompts and read input()
+    proc = subprocess.Popen(cmd)
     return proc
 
 
@@ -104,7 +105,7 @@ def main():
         "intercept_once": args.once,
     }
     mitm_proc = start_mitmdump(args.port, addon_path, opts)
-    print("Proxy output will follow. First time: open", "http://mitm.it", "in the proxied browser to install the certificate.")
+    print("Proxy started (mitmdump). First time: open http://mitm.it in the proxied browser to install the certificate.")
     wait_for_proxy(mitm_proc)
 
     # Launch Chrome
@@ -136,11 +137,10 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    # Pipe mitm output to console
+    # Keep the launcher alive while mitmdump runs so Ctrl+C stops both
     try:
-        if mitm_proc.stdout:
-            for line in mitm_proc.stdout:
-                print(line.rstrip())
+        mitmdump_rc = mitm_proc.wait()
+        print(f"mitmdump exited with code {mitmdump_rc}")
     except KeyboardInterrupt:
         shutdown()
 
