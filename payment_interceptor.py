@@ -90,6 +90,9 @@ class PaymentModifier:
                 chosen_idx = max(0, min(int(raw), len(matches)-1))
 
         path, parent, key_or_index = matches[chosen_idx]
+        ctx.log.info(
+            f"Intercepting {flow.request.method} {flow.request.pretty_url} -> editing field {self._fmt_path(path)}"
+        )
         parent[key_or_index] = self._prompt_edit(parent[key_or_index], label=self._fmt_path(path))
 
         # Update response with modified data
@@ -100,15 +103,15 @@ class PaymentModifier:
 
     def _prompt_edit(self, obj, label: str):
         ctx.log.info("=== Intercepted response. Allowing manual edit. ===")
-        print("\n==============================")
-        print(f"Editing field: {label}")
-        print("Current value:")
-        print(json.dumps(obj, indent=2, ensure_ascii=False))
-        print("------------------------------")
-        print("Instructions:")
-        print("- Press Enter to accept current value")
-        print("- Or paste new JSON for this field (e.g., {\"price\":0.01,\"currency\":\"eur\"})")
-        print("==============================\n")
+        print("\n==============================", flush=True)
+        print(f"Editing field: {label}", flush=True)
+        print("Current value:", flush=True)
+        print(json.dumps(obj, indent=2, ensure_ascii=False), flush=True)
+        print("------------------------------", flush=True)
+        print("Instructions:", flush=True)
+        print("- Press Enter to accept current value", flush=True)
+        print("- Or paste new JSON for this field (e.g., {\"price\":0.01,\"currency\":\"eur\"})", flush=True)
+        print("==============================\n", flush=True)
         user_input = input("New JSON (blank to keep): ").strip()
         if not user_input:
             return obj
