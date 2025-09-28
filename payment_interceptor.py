@@ -41,8 +41,23 @@ class PaymentModifier:
         # Host filter
         target_host = ctx.options.target_host.strip()
         if target_host and flow.request.host != target_host:
-{{ ... }}
+            return
 
+        # Path filter
+        if ctx.options.target_path_substr not in flow.request.path:
+            return
+
+        # Already intercepted?
+        if ctx.options.intercept_once and self.intercepted_once:
+            return
+
+        # Content-Type must be JSON-like
+        content_type = flow.response.headers.get("content-type", "").lower()
+        if "application/json" not in content_type and not flow.response.text.strip().startswith("{"):
+            return
+
+        try:
+            data = json.loads(flow.response.get_text())
         except Exception as e:
             ctx.log.warn(f"Failed to parse JSON: {e}")
             return
@@ -50,7 +65,7 @@ class PaymentModifier:
         key = ctx.options.json_key
 
         # Deep search for all occurrences of the key (dicts + lists)
-        matches = []  # list of tuples: (path_list, parent_container, key_or_index)
+        matches = []  # tuples: (path_list, parent_container, key_or_index)
 
         def walk(node, path):
             if isinstance(node, dict):
@@ -67,11 +82,12 @@ class PaymentModifier:
         if not matches:
             return
 
-        if ctx.options.modify_all and matches:
+        if ctx.options.modify_all:
             # Prompt once using the first match as example, then apply to all
             sample_path, sample_parent, sample_key = matches[0]
             new_val = self._prompt_edit(
-                sample_parent[sample_key], label=self._fmt_path(sample_path) + " (apply to ALL matches)"
+                sample_parent[sample_key],
+                label=self._fmt_path(sample_path) + " (apply to ALL matches)"
             )
             for _, parent, k_or_i in matches:
                 parent[k_or_i] = new_val
@@ -98,7 +114,36 @@ class PaymentModifier:
         flow.response.text = json.dumps(data)
         flow.response.headers["content-length"] = str(len(flow.response.text.encode("utf-8")))
         self.intercepted_once = True
-{{ ... }}
+        ctx.log.info("Response modified and forwarded.")
+
+    def _prompt_edit(self, obj, label: str):
+        ctx.log.info("=== Intercepted response. Allowing manual edit. ===")
+        print("\n==============================")
+        print(f"Editing field: {label}")
+        print("Current value:")
+        print(json.dumps(obj, indent=2, ensure_ascii=False))
+        print("------------------------------")
+        print("Instructions:")
+        print("- Press Enter to accept current value")
+        print("- Or paste new JSON for this field (e.g., {\"price\":0.01,\"currency\":\"eur\"})")
+        print("==============================\n")
+        user_input = input("New JSON (blank to keep): ").strip()
+        if not user_input:
+            return obj
+        try:
+            new_obj = json.loads(user_input)
+            return new_obj
+        except Exception as e:
+            print(f"Invalid JSON, keeping original. Error: {e}")
+            return obj
+
+    def _fmt_path(self, path_list):
+        out = []
+        for p in path_list:
+            if isinstance(p, int):
+                out.append(f"[{p}]")
+            else:
+                if out:
                     out.append(".")
                 out.append(p)
         return "".join(out)
