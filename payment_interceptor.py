@@ -1,4 +1,5 @@
 import json
+import gzip
 from mitmproxy import http, ctx, addons
 
 class PaymentModifier:
@@ -167,17 +168,19 @@ class PaymentModifier:
             path_str = self._fmt_path(path)
             old_val = parent[key_or_index]
             new_val = self._prompt_edit(old_val, label=path_str + f" [{where_label}]")
+            # If user kept the same value, do not mark as changed to avoid rewriting the body
+            if new_val == old_val:
+                if ctx.options.trace:
+                    self._tee_log("info", f"Kept original for {where_label}: {path_str}")
+                return False
             parent[key_or_index] = new_val
             if ctx.options.trace:
-                if new_val != old_val:
-                    try:
-                        old_json = json.dumps(old_val, ensure_ascii=False)
-                        new_json = json.dumps(new_val, ensure_ascii=False)
-                        self._tee_log("info", f"Edited {where_label}: {path_str}: {old_json} -> {new_json}")
-                    except Exception:
-                        self._tee_log("info", f"Edited {where_label}: {path_str}: <changed>")
-                else:
-                    self._tee_log("info", f"Kept original for {where_label}: {path_str}")
+                try:
+                    old_json = json.dumps(old_val, ensure_ascii=False)
+                    new_json = json.dumps(new_val, ensure_ascii=False)
+                    self._tee_log("info", f"Edited {where_label}: {path_str}: {old_json} -> {new_json}")
+                except Exception:
+                    self._tee_log("info", f"Edited {where_label}: {path_str}: <changed>")
             return True
 
     def _maybe_modify_request(self, flow: http.HTTPFlow) -> bool:
@@ -213,11 +216,32 @@ class PaymentModifier:
             return False
         changed = self._modify_json(data, where_label="response")
         if changed:
-            flow.response.text = json.dumps(data, ensure_ascii=False)
-            # Remove encoding and length so mitmproxy recalculates and sends plain text JSON
-            flow.response.headers.pop("content-encoding", None)
+            # Serialize JSON
+            new_text = json.dumps(data, ensure_ascii=False)
+            # Preserve original content-encoding if present (e.g., gzip)
+            orig_ct = flow.response.headers.get("content-type")
+            orig_ce = (flow.response.headers.get("content-encoding") or "").lower()
+            try:
+                if "gzip" in orig_ce:
+                    new_bytes = new_text.encode("utf-8")
+                    gz_bytes = gzip.compress(new_bytes)
+                    flow.response.content = gz_bytes
+                    flow.response.headers["content-encoding"] = "gzip"
+                else:
+                    flow.response.text = new_text
+                    # Ensure we don't advertise a wrong encoding
+                    flow.response.headers.pop("content-encoding", None)
+            except Exception:
+                # Fallback to plain text
+                flow.response.text = new_text
+                flow.response.headers.pop("content-encoding", None)
+            # Let mitmproxy recalc content-length
             flow.response.headers.pop("content-length", None)
-            flow.response.headers["content-type"] = "application/json; charset=utf-8"
+            # Preserve content-type if it existed; otherwise set JSON
+            if orig_ct:
+                flow.response.headers["content-type"] = orig_ct
+            else:
+                flow.response.headers["content-type"] = "application/json; charset=utf-8"
         return changed
 
     def request(self, flow: http.HTTPFlow) -> None:
