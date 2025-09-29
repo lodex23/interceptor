@@ -164,7 +164,20 @@ class PaymentModifier:
                 if raw.isdigit():
                     chosen_idx = max(0, min(int(raw), len(matches) - 1))
             path, parent, key_or_index = matches[chosen_idx]
-            parent[key_or_index] = self._prompt_edit(parent[key_or_index], label=self._fmt_path(path) + f" [{where_label}]")
+            path_str = self._fmt_path(path)
+            old_val = parent[key_or_index]
+            new_val = self._prompt_edit(old_val, label=path_str + f" [{where_label}]")
+            parent[key_or_index] = new_val
+            if ctx.options.trace:
+                if new_val != old_val:
+                    try:
+                        old_json = json.dumps(old_val, ensure_ascii=False)
+                        new_json = json.dumps(new_val, ensure_ascii=False)
+                        self._tee_log("info", f"Edited {where_label}: {path_str}: {old_json} -> {new_json}")
+                    except Exception:
+                        self._tee_log("info", f"Edited {where_label}: {path_str}: <changed>")
+                else:
+                    self._tee_log("info", f"Kept original for {where_label}: {path_str}")
             return True
 
     def _maybe_modify_request(self, flow: http.HTTPFlow) -> bool:
