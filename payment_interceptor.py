@@ -53,6 +53,12 @@ class PaymentModifier:
             default=False,
             help="If true, log matches and chosen edits for debugging.",
         )
+        loader.add_option(
+            name="addon_log_file",
+            typespec=str,
+            default="",
+            help="If set, write addon logs to this file in addition to mitmdump console.",
+        )
 
     def _should_target(self, flow: http.HTTPFlow) -> bool:
         # Host filter
@@ -64,11 +70,29 @@ class PaymentModifier:
             return False
         return True
 
+    def _tee_log(self, level: str, msg: str) -> None:
+        try:
+            if level == "info":
+                ctx.log.info(msg)
+            elif level == "warn":
+                ctx.log.warn(msg)
+            else:
+                ctx.log.info(msg)
+        except Exception:
+            pass
+        path = getattr(ctx.options, "addon_log_file", "") or ""
+        if path:
+            try:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(msg + "\n")
+            except Exception:
+                pass
+
     def _load_json_text(self, text: str) -> tuple[bool, dict | list | None]:
         try:
             return True, json.loads(text)
         except Exception as e:
-            ctx.log.warn(f"Failed to parse JSON: {e}")
+            self._tee_log("warn", f"Failed to parse JSON: {e}")
             return False, None
 
     def _find_matches(self, data, keys):
@@ -94,7 +118,7 @@ class PaymentModifier:
         matches = self._find_matches(data, set(keys))
         if not matches:
             if ctx.options.trace:
-                ctx.log.info(f"No matches for keys {keys} in {where_label} body.")
+                self._tee_log("info", f"No matches for keys {keys} in {where_label} body.")
             return False
 
         if ctx.options.modify_all:
@@ -103,7 +127,7 @@ class PaymentModifier:
             for _, parent, k_or_i in matches:
                 parent[k_or_i] = new_val
             if ctx.options.trace:
-                ctx.log.info(f"Modified {len(matches)} item(s) in {where_label}.")
+                self._tee_log("info", f"Modified {len(matches)} item(s) in {where_label}.")
             return True
         else:
             chosen_idx = 0
@@ -179,7 +203,7 @@ class PaymentModifier:
             self.intercepted_once = True
 
     def _prompt_edit(self, obj, label: str):
-        ctx.log.info("=== Intercepted response. Allowing manual edit. ===")
+        self._tee_log("info", "=== Intercepted response. Allowing manual edit. ===")
         print("\n==============================")
         print(f"Editing field: {label}")
         print("Current value:")
