@@ -24,7 +24,7 @@ class PaymentModifier:
             help="DEPRECATED. Use 'keys' to specify comma-separated keys to modify (json_key kept for backward compatibility).",
         )
         loader.add_option(
-            name="keys",
+            name="json_keys",
             typespec=str,
             default="payment_price,amount,price",
             help="Comma-separated JSON keys to modify (deep, including arrays).",
@@ -87,7 +87,7 @@ class PaymentModifier:
 
     def _modify_json(self, data, where_label: str) -> bool:
         # Determine keys to search
-        keys = [k.strip() for k in (ctx.options.keys or "").split(",") if k.strip()]
+        keys = [k.strip() for k in (ctx.options.json_keys or "").split(",") if k.strip()]
         if not keys:
             keys = [ctx.options.json_key]
 
@@ -135,8 +135,11 @@ class PaymentModifier:
             return False
         changed = self._modify_json(data, where_label="request")
         if changed:
-            flow.request.text = json.dumps(data)
-            flow.request.headers["content-length"] = str(len(flow.request.text.encode("utf-8")))
+            flow.request.text = json.dumps(data, ensure_ascii=False)
+            # Remove encoding and length so mitmproxy recalculates correctly
+            flow.request.headers.pop("content-encoding", None)
+            flow.request.headers.pop("content-length", None)
+            flow.request.headers["content-type"] = "application/json; charset=utf-8"
         return changed
 
     def _maybe_modify_response(self, flow: http.HTTPFlow) -> bool:
@@ -152,8 +155,11 @@ class PaymentModifier:
             return False
         changed = self._modify_json(data, where_label="response")
         if changed:
-            flow.response.text = json.dumps(data)
-            flow.response.headers["content-length"] = str(len(flow.response.text.encode("utf-8")))
+            flow.response.text = json.dumps(data, ensure_ascii=False)
+            # Remove encoding and length so mitmproxy recalculates and sends plain text JSON
+            flow.response.headers.pop("content-encoding", None)
+            flow.response.headers.pop("content-length", None)
+            flow.response.headers["content-type"] = "application/json; charset=utf-8"
         return changed
 
     def request(self, flow: http.HTTPFlow) -> None:
@@ -181,13 +187,18 @@ class PaymentModifier:
         print("------------------------------")
         print("Instructions:")
         print("- Press Enter to accept current value")
-        print("- Or paste new JSON for this field (e.g., {\"price\":0.01,\"currency\":\"eur\"})")
+        print("- Paste new JSON for this field. IMPORTANT: keep the same type as current value.")
+        print("  * If current is a number, input a number (e.g., 0.01)")
+        print("  * If current is an object, input an object (e.g., {\"price\":0.01,\"currency\":\"eur\"})")
         print("==============================\n")
         user_input = input("New JSON (blank to keep): ").strip()
         if not user_input:
             return obj
         try:
             new_obj = json.loads(user_input)
+            if type(new_obj) is not type(obj):
+                print(f"Type mismatch: expected {type(obj).__name__}, got {type(new_obj).__name__}. Keeping original to avoid breaking the page.")
+                return obj
             return new_obj
         except Exception as e:
             print(f"Invalid JSON, keeping original. Error: {e}")
