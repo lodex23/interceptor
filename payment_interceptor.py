@@ -124,11 +124,32 @@ class PaymentModifier:
         if ctx.options.modify_all:
             sample_path, sample_parent, sample_key = matches[0]
             new_val = self._prompt_edit(sample_parent[sample_key], label=self._fmt_path(sample_path) + f" [{where_label}] apply to ALL")
-            for _, parent, k_or_i in matches:
-                parent[k_or_i] = new_val
+            new_type = type(new_val)
+            changed = 0
+            skipped = 0
+            sample_changed_paths = []
+            sample_skipped_paths = []
+            for path_list, parent, k_or_i in matches:
+                try:
+                    cur_val = parent[k_or_i]
+                    if type(cur_val) is new_type:
+                        parent[k_or_i] = new_val
+                        changed += 1
+                        if len(sample_changed_paths) < 10:
+                            sample_changed_paths.append(self._fmt_path(path_list))
+                    else:
+                        skipped += 1
+                        if len(sample_skipped_paths) < 10:
+                            sample_skipped_paths.append(self._fmt_path(path_list) + f" (type {type(cur_val).__name__})")
+                except Exception:
+                    skipped += 1
             if ctx.options.trace:
-                self._tee_log("info", f"Modified {len(matches)} item(s) in {where_label}.")
-            return True
+                self._tee_log("info", f"Modified {changed} item(s), skipped {skipped} due to type mismatch in {where_label}.")
+                if sample_changed_paths:
+                    self._tee_log("info", f"Changed paths (sample): {', '.join(sample_changed_paths)}")
+                if sample_skipped_paths:
+                    self._tee_log("info", f"Skipped paths (sample): {', '.join(sample_skipped_paths)}")
+            return changed > 0
         else:
             chosen_idx = 0
             if len(matches) > 1:
