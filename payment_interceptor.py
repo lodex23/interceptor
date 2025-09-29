@@ -16,13 +16,18 @@ class PaymentModifier:
             name="target_path_substr",
             typespec=str,
             default="purchase_settings",
-            help="Substring that must be present in the request path to intercept.",
         )
         loader.add_option(
             name="json_key",
             typespec=str,
             default="payment_price",
-            help="JSON key in the response to modify.",
+            help="DEPRECATED. Use 'keys' to specify comma-separated keys to modify (json_key kept for backward compatibility).",
+        )
+        loader.add_option(
+            name="keys",
+            typespec=str,
+            default="payment_price,amount,price",
+            help="Comma-separated JSON keys to modify (deep, including arrays).",
         )
         loader.add_option(
             name="intercept_once",
@@ -36,67 +41,74 @@ class PaymentModifier:
             default=False,
             help="If true, modify all occurrences of json_key found in the JSON (deep, including arrays).",
         )
+        loader.add_option(
+            name="modify_in",
+            typespec=str,
+            default="response",
+            help="Where to modify: 'response', 'request', or 'both'.",
+        )
+        loader.add_option(
+            name="trace",
+            typespec=bool,
+            default=False,
+            help="If true, log matches and chosen edits for debugging.",
+        )
 
-    def response(self, flow: http.HTTPFlow) -> None:
+    def _should_target(self, flow: http.HTTPFlow) -> bool:
         # Host filter
         target_host = ctx.options.target_host.strip()
         if target_host and flow.request.host != target_host:
-            return
-
+            return False
         # Path filter
         if ctx.options.target_path_substr not in flow.request.path:
-            return
+            return False
+        return True
 
-        # Already intercepted?
-        if ctx.options.intercept_once and self.intercepted_once:
-            return
-
-        # Content-Type must be JSON-like
-        content_type = flow.response.headers.get("content-type", "").lower()
-        if "application/json" not in content_type and not flow.response.text.strip().startswith("{"):
-            return
-
+    def _load_json_text(self, text: str) -> tuple[bool, dict | list | None]:
         try:
-            data = json.loads(flow.response.get_text())
+            return True, json.loads(text)
         except Exception as e:
             ctx.log.warn(f"Failed to parse JSON: {e}")
-            return
+            return False, None
 
-        key = ctx.options.json_key
-
-        # Deep search for all occurrences of the key (dicts + lists)
+    def _find_matches(self, data, keys):
         matches = []  # tuples: (path_list, parent_container, key_or_index)
-
         def walk(node, path):
             if isinstance(node, dict):
                 for k, v in node.items():
-                    if k == key:
+                    if k in keys:
                         matches.append((path + [k], node, k))
                     walk(v, path + [k])
             elif isinstance(node, list):
                 for idx, item in enumerate(node):
                     walk(item, path + [idx])
-
         walk(data, [])
+        return matches
 
+    def _modify_json(self, data, where_label: str) -> bool:
+        # Determine keys to search
+        keys = [k.strip() for k in (ctx.options.keys or "").split(",") if k.strip()]
+        if not keys:
+            keys = [ctx.options.json_key]
+
+        matches = self._find_matches(data, set(keys))
         if not matches:
-            return
+            if ctx.options.trace:
+                ctx.log.info(f"No matches for keys {keys} in {where_label} body.")
+            return False
 
         if ctx.options.modify_all:
-            # Prompt once using the first match as example, then apply to all
             sample_path, sample_parent, sample_key = matches[0]
-            new_val = self._prompt_edit(
-                sample_parent[sample_key],
-                label=self._fmt_path(sample_path) + " (apply to ALL matches)"
-            )
+            new_val = self._prompt_edit(sample_parent[sample_key], label=self._fmt_path(sample_path) + f" [{where_label}] apply to ALL")
             for _, parent, k_or_i in matches:
                 parent[k_or_i] = new_val
-            ctx.log.info(f"Modified {len(matches)} occurrence(s) of '{key}'.")
+            if ctx.options.trace:
+                ctx.log.info(f"Modified {len(matches)} item(s) in {where_label}.")
+            return True
         else:
-            # Let user choose which one to edit when multiple are found
             chosen_idx = 0
             if len(matches) > 1:
-                print(f"\nFound {len(matches)} occurrences of '{key}'.")
+                print(f"\nFound {len(matches)} occurrences in {where_label}.")
                 for i, (p, parent, k_or_i) in enumerate(matches):
                     try:
                         current_val = parent[k_or_i]
@@ -106,15 +118,59 @@ class PaymentModifier:
                 raw = input("Select index to edit (default 0): ").strip()
                 if raw.isdigit():
                     chosen_idx = max(0, min(int(raw), len(matches) - 1))
-
             path, parent, key_or_index = matches[chosen_idx]
-            parent[key_or_index] = self._prompt_edit(parent[key_or_index], label=self._fmt_path(path))
+            parent[key_or_index] = self._prompt_edit(parent[key_or_index], label=self._fmt_path(path) + f" [{where_label}]")
+            return True
 
-        # Update response with modified data
-        flow.response.text = json.dumps(data)
-        flow.response.headers["content-length"] = str(len(flow.response.text.encode("utf-8")))
-        self.intercepted_once = True
-        ctx.log.info("Response modified and forwarded.")
+    def _maybe_modify_request(self, flow: http.HTTPFlow) -> bool:
+        if ctx.options.modify_in not in ("request", "both"):
+            return False
+        # Only handle JSON requests
+        content_type = flow.request.headers.get("content-type", "").lower()
+        text = flow.request.get_text()
+        if ("application/json" not in content_type) and (not text.strip().startswith("{")):
+            return False
+        ok, data = self._load_json_text(text)
+        if not ok:
+            return False
+        changed = self._modify_json(data, where_label="request")
+        if changed:
+            flow.request.text = json.dumps(data)
+            flow.request.headers["content-length"] = str(len(flow.request.text.encode("utf-8")))
+        return changed
+
+    def _maybe_modify_response(self, flow: http.HTTPFlow) -> bool:
+        if ctx.options.modify_in not in ("response", "both"):
+            return False
+        # Only handle JSON responses
+        content_type = flow.response.headers.get("content-type", "").lower()
+        text = flow.response.get_text()
+        if ("application/json" not in content_type) and (not text.strip().startswith("{")):
+            return False
+        ok, data = self._load_json_text(text)
+        if not ok:
+            return False
+        changed = self._modify_json(data, where_label="response")
+        if changed:
+            flow.response.text = json.dumps(data)
+            flow.response.headers["content-length"] = str(len(flow.response.text.encode("utf-8")))
+        return changed
+
+    def request(self, flow: http.HTTPFlow) -> None:
+        if not self._should_target(flow):
+            return
+        if ctx.options.intercept_once and self.intercepted_once:
+            return
+        if self._maybe_modify_request(flow):
+            self.intercepted_once = True
+
+    def response(self, flow: http.HTTPFlow) -> None:
+        if not self._should_target(flow):
+            return
+        if ctx.options.intercept_once and self.intercepted_once:
+            return
+        if self._maybe_modify_response(flow):
+            self.intercepted_once = True
 
     def _prompt_edit(self, obj, label: str):
         ctx.log.info("=== Intercepted response. Allowing manual edit. ===")
