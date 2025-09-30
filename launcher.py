@@ -27,12 +27,6 @@ def find_chrome(custom_path: str | None) -> str | None:
 
 
 def start_mitmdump(port: int, addon_path: str, opts: dict[str, str | bool]) -> subprocess.Popen:
-    set_parts = []
-    for k, v in opts.items():
-        if isinstance(v, bool):
-            v = "true" if v else "false"
-        set_parts.append(f"{k}={v}")
-    set_arg = ",".join(set_parts)
     cmd = [
         sys.executable.replace("pythonw.exe", "python.exe"),
         "-m",
@@ -42,9 +36,13 @@ def start_mitmdump(port: int, addon_path: str, opts: dict[str, str | bool]) -> s
         str(port),
         "-s",
         f"{addon_path}",
-        "--set",
-        set_arg,
     ]
+    # Pass each option as its own --set to avoid commas in values (e.g., json_keys) breaking parsing
+    for k, v in opts.items():
+        val = v
+        if isinstance(val, bool):
+            val = "true" if val else "false"
+        cmd.extend(["--set", f"{k}={val}"])
     print("Starting mitmdump:", " ".join(cmd))
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     return proc
@@ -125,6 +123,7 @@ def main():
 
     # Start mitmdump
     opts = {
+        "target_host": args.target_host,
         "target_path_substr": args.target_path_substr,
         "json_key": args.json_key,
         "intercept_once": args.once,
@@ -139,8 +138,6 @@ def main():
     tee_print("Logging to:", str(log_path))
     tee_print("Proxy output will follow. First time: open http://mitm.it in the proxied browser to install the certificate.")
     wait_for_proxy(mitm_proc)
-
-{{ ... }}
     chrome_path = find_chrome(args.chrome)
     chrome_proc = None
     if chrome_path:
