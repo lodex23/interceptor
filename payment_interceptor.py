@@ -55,6 +55,12 @@ class PaymentModifier:
             help="If true, log matches and chosen edits for debugging.",
         )
         loader.add_option(
+            name="dump_body_file",
+            typespec=str,
+            default="",
+            help="If set, dump the full JSON body (before edits) of matched responses to this file.",
+        )
+        loader.add_option(
             name="addon_log_file",
             typespec=str,
             default="",
@@ -211,6 +217,17 @@ class PaymentModifier:
         text = flow.response.get_text()
         if ("application/json" not in content_type) and (not text.strip().startswith("{")):
             return False
+        # Dump full body before edits for debugging
+        dump_path = getattr(ctx.options, "dump_body_file", "") or ""
+        if dump_path:
+            try:
+                with open(dump_path, "w", encoding="utf-8") as f:
+                    f.write(text)
+                if ctx.options.trace:
+                    self._tee_log("info", f"Dumped response body to: {dump_path}")
+            except Exception as e:
+                if ctx.options.trace:
+                    self._tee_log("warn", f"Failed to dump response body: {e}")
         ok, data = self._load_json_text(text)
         if not ok:
             return False
