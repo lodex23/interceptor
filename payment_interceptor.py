@@ -212,15 +212,13 @@ class PaymentModifier:
     def _maybe_modify_response(self, flow: http.HTTPFlow) -> bool:
         if ctx.options.modify_in not in ("response", "both"):
             return False
-        # Only handle JSON responses
-        content_type = flow.response.headers.get("content-type", "").lower()
-        text = flow.response.get_text()
-        if ("application/json" not in content_type) and (not text.strip().startswith("{")):
-            return False
-        # Dump full body before edits for debugging
+        # Dump full body before edits for debugging (regardless of content-type)
         dump_path = getattr(ctx.options, "dump_body_file", "") or ""
+        text = flow.response.get_text()
         if dump_path:
             try:
+                import os
+                os.makedirs(os.path.dirname(dump_path) or ".", exist_ok=True)
                 with open(dump_path, "w", encoding="utf-8") as f:
                     f.write(text)
                 if ctx.options.trace:
@@ -228,6 +226,10 @@ class PaymentModifier:
             except Exception as e:
                 if ctx.options.trace:
                     self._tee_log("warn", f"Failed to dump response body: {e}")
+        # Only handle JSON responses
+        content_type = flow.response.headers.get("content-type", "").lower()
+        if ("application/json" not in content_type) and (not text.strip().startswith("{")):
+            return False
         ok, data = self._load_json_text(text)
         if not ok:
             return False
