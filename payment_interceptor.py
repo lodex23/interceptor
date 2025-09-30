@@ -68,13 +68,24 @@ class PaymentModifier:
         )
 
     def _should_target(self, flow: http.HTTPFlow) -> bool:
-        # Host filter
-        target_host = ctx.options.target_host.strip()
-        if target_host and flow.request.host != target_host:
-            return False
-        # Path filter
-        if ctx.options.target_path_substr not in flow.request.path:
-            return False
+        # Host filter (case-insensitive substring)
+        target_host = (ctx.options.target_host or "").strip()
+        if target_host:
+            if not flow.request.host:
+                if ctx.options.trace:
+                    self._tee_log("info", "Skip: no request.host")
+                return False
+            if target_host.lower() not in flow.request.host.lower():
+                if ctx.options.trace:
+                    self._tee_log("info", f"Skip by host: {flow.request.host} does not contain {target_host}")
+                return False
+        # Path filter (case-insensitive substring)
+        target_path = (ctx.options.target_path_substr or "").strip()
+        if target_path:
+            if target_path.lower() not in (flow.request.path or "").lower():
+                if ctx.options.trace:
+                    self._tee_log("info", f"Skip by path: {flow.request.path} does not contain {target_path}")
+                return False
         return True
 
     def _tee_log(self, level: str, msg: str) -> None:
@@ -90,6 +101,8 @@ class PaymentModifier:
         path = getattr(ctx.options, "addon_log_file", "") or ""
         if path:
             try:
+                import os
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
                 with open(path, "a", encoding="utf-8") as f:
                     f.write(msg + "\n")
             except Exception:
